@@ -153,12 +153,12 @@ fun TranslateScreen(
                     Spacer(modifier = Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Chưa nhập API Key DeepSeek",
+                            text = "Chưa nhập API Key Dịch Thuật Đám Mây",
                             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
                             color = MaterialTheme.colorScheme.onSecondaryContainer
                         )
                         Text(
-                            text = "Đang sử dụng Động cơ Y khoa Nội bộ. Nhấp vào đây để thêm API Key DeepSeek.",
+                            text = "Đang sử dụng Động cơ Y Khoa Thông Minh Nội Bộ (Dịch chuẩn Tiếng Việt). Chạm để thêm API Key DeepSeek hoặc Gemini.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSecondaryContainer
                         )

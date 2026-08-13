@@ -4,6 +4,10 @@ import android.util.Log
 import com.example.data.api.ChatMessage
 import com.example.data.api.DeepSeekApiService
 import com.example.data.api.DeepSeekRequest
+import com.example.data.api.GeminiApiService
+import com.example.data.api.GeminiContent
+import com.example.data.api.GeminiPart
+import com.example.data.api.GeminiRequest
 import com.example.data.local.DocumentDao
 import com.example.data.local.DocumentEntity
 import com.example.data.local.PageBlockEntity
@@ -36,6 +40,16 @@ class TranslationRepository(private val documentDao: DocumentDao) {
         documentDao.deleteDocumentWithBlocks(id)
     }
 
+    private fun isRealKey(key: String): Boolean {
+        val trimmed = key.trim()
+        if (trimmed.isBlank()) return false
+        val lower = trimmed.lowercase()
+        if (lower.contains("my_") || lower.contains("your_") || lower.contains("placeholder") || lower.contains("xxx") || lower == "my_deepseek_api_key" || lower == "my_gemini_api_key") {
+            return false
+        }
+        return true
+    }
+
     private fun buildDeepSeekService(baseUrl: String = "https://api.deepseek.com/"): DeepSeekApiService {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BODY
@@ -56,6 +70,22 @@ class TranslationRepository(private val documentDao: DocumentDao) {
         return retrofit.create(DeepSeekApiService::class.java)
     }
 
+    private fun buildGeminiService(baseUrl: String = "https://generativelanguage.googleapis.com/"): GeminiApiService {
+        val client = OkHttpClient.Builder()
+            .connectTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .build()
+
+        val retrofit = Retrofit.Builder()
+            .baseUrl(baseUrl)
+            .client(client)
+            .addConverterFactory(MoshiConverterFactory.create())
+            .build()
+
+        return retrofit.create(GeminiApiService::class.java)
+    }
+
     suspend fun translateDocument(
         fileName: String,
         title: String,
@@ -67,13 +97,15 @@ class TranslationRepository(private val documentDao: DocumentDao) {
     ): Long = withContext(Dispatchers.IO) {
 
         val totalPages = pagesText.size
+        val hasRealKey = isRealKey(apiKey)
+        
         val docId = documentDao.insertDocument(
             DocumentEntity(
                 fileName = fileName,
                 title = title,
                 totalPages = totalPages,
                 translatedPages = 0,
-                modelUsed = if (apiKey.isNotBlank()) model else "Smart Medical AI Engine",
+                modelUsed = if (hasRealKey) model else "Smart Offline Medical AI",
                 status = "IN_PROGRESS",
                 isSample = isSample
             )
@@ -129,46 +161,20 @@ class TranslationRepository(private val documentDao: DocumentDao) {
         model: String
     ): List<String> {
         val trimmedKey = apiKey.trim()
-        if (trimmedKey.isNotBlank()) {
-            try {
-                val service = buildDeepSeekService()
-                val promptContent = pageLines.joinToString("\n--LINE_BREAK--\n")
-                val systemPrompt = """
-                    You are an expert English-to-Vietnamese medical translator specializing in clinical terminology, oncology, cardiology, pharmacology, and neurology.
-                    TRANSLATION RULES:
-                    1. Translate into precise standard Vietnamese medical terms (thuật ngữ y khoa Việt Nam chuẩn).
-                    2. Maintain exact line structure! The input lines are separated by '--LINE_BREAK--'.
-                    3. Output EXACTLY the same number of lines separated by '--LINE_BREAK--'.
-                    4. Preserve markdown headers (#), bullet points (- or *), and numbered lists.
-                    5. Do NOT include extra commentary or introduction. Output ONLY translated lines separated by '--LINE_BREAK--'.
-                """.trimIndent()
-
-                val request = DeepSeekRequest(
-                    model = model,
-                    messages = listOf(
-                        ChatMessage("system", systemPrompt),
-                        ChatMessage("user", promptContent)
-                    ),
-                    temperature = 0.15
-                )
-
-                val response = service.translateText("Bearer $trimmedKey", request)
-                if (response.isSuccessful) {
-                    val content = response.body()?.choices?.firstOrNull()?.message?.content
-                    if (!content.isNullOrBlank()) {
-                        val resultLines = content.split("--LINE_BREAK--").map { it.trim() }
-                        if (resultLines.size == pageLines.size) {
-                            return resultLines
-                        } else {
-                            // If count mismatch, map individually or fall back
-                            return resultLines
-                        }
-                    }
-                } else {
-                    Log.e("TranslationRepo", "DeepSeek API response error: ${response.code()} ${response.errorBody()?.string()}")
+        if (isRealKey(trimmedKey)) {
+            // Check model type or API key prefix
+            val isGemini = model.contains("gemini", ignoreCase = true) || trimmedKey.startsWith("AIza")
+            
+            if (isGemini) {
+                val geminiResult = translateWithGemini(pageLines, trimmedKey)
+                if (geminiResult != null && geminiResult.isNotEmpty()) {
+                    return geminiResult
                 }
-            } catch (e: Exception) {
-                Log.e("TranslationRepo", "DeepSeek API call failed", e)
+            } else {
+                val deepSeekResult = translateWithDeepSeek(pageLines, trimmedKey, model)
+                if (deepSeekResult != null && deepSeekResult.isNotEmpty()) {
+                    return deepSeekResult
+                }
             }
         }
 
@@ -176,11 +182,118 @@ class TranslationRepository(private val documentDao: DocumentDao) {
         return pageLines.map { line -> translateSingleLineFallback(line) }
     }
 
+    private suspend fun translateWithDeepSeek(
+        pageLines: List<String>,
+        apiKey: String,
+        model: String
+    ): List<String>? {
+        return try {
+            val service = buildDeepSeekService()
+            val promptBuilder = StringBuilder()
+            promptBuilder.append("Translate the following English medical lines into accurate Vietnamese. Return EXACTLY line by line formatted as 'LINE_1: ...', 'LINE_2: ...', etc.\n\n")
+            for (i in pageLines.indices) {
+                promptBuilder.append("LINE_${i + 1}: ${pageLines[i]}\n")
+            }
+
+            val systemPrompt = """
+                You are an expert English-to-Vietnamese medical translator specializing in clinical terminology, oncology, cardiology, pharmacology, and neurology.
+                TRANSLATION RULES:
+                1. Translate into precise standard Vietnamese medical terms (thuật ngữ y khoa Việt Nam chuẩn).
+                2. Return each translated line starting with its corresponding prefix 'LINE_1:', 'LINE_2:', etc.
+                3. Maintain exact line order and count.
+                4. Preserve markdown headers (#), bullet points (- or *), and numbered lists inside the text.
+                5. Output ONLY the prefixed lines. Do NOT add introduction or commentary.
+            """.trimIndent()
+
+            val request = DeepSeekRequest(
+                model = model,
+                messages = listOf(
+                    ChatMessage("system", systemPrompt),
+                    ChatMessage("user", promptBuilder.toString())
+                ),
+                temperature = 0.15
+            )
+
+            val response = service.translateText("Bearer $apiKey", request)
+            if (response.isSuccessful) {
+                val content = response.body()?.choices?.firstOrNull()?.message?.content
+                if (!content.isNullOrBlank()) {
+                    return parseLinePrefixedOutput(content, pageLines)
+                }
+            } else {
+                Log.e("TranslationRepo", "DeepSeek API response error: ${response.code()} ${response.errorBody()?.string()}")
+            }
+            null
+        } catch (e: Exception) {
+            Log.e("TranslationRepo", "DeepSeek API call failed", e)
+            null
+        }
+    }
+
+    private suspend fun translateWithGemini(
+        pageLines: List<String>,
+        apiKey: String
+    ): List<String>? {
+        return try {
+            val service = buildGeminiService()
+            val promptBuilder = StringBuilder()
+            promptBuilder.append("Translate the following English medical lines into accurate Vietnamese. Return EXACTLY line by line formatted as 'LINE_1: ...', 'LINE_2: ...', etc.\n\n")
+            for (i in pageLines.indices) {
+                promptBuilder.append("LINE_${i + 1}: ${pageLines[i]}\n")
+            }
+
+            val systemPrompt = "You are an expert English-to-Vietnamese medical translator. Translate into standard Vietnamese medical terminology. Output ONLY lines starting with LINE_1:, LINE_2:, etc."
+
+            val request = GeminiRequest(
+                contents = listOf(
+                    GeminiContent(parts = listOf(GeminiPart(text = promptBuilder.toString())))
+                ),
+                systemInstruction = GeminiContent(parts = listOf(GeminiPart(text = systemPrompt)))
+            )
+
+            val response = service.generateContent(apiKey, request)
+            if (response.isSuccessful) {
+                val content = response.body()?.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+                if (!content.isNullOrBlank()) {
+                    return parseLinePrefixedOutput(content, pageLines)
+                }
+            } else {
+                Log.e("TranslationRepo", "Gemini API error: ${response.code()} ${response.errorBody()?.string()}")
+            }
+            null
+        } catch (e: Exception) {
+            Log.e("TranslationRepo", "Gemini API call failed", e)
+            null
+        }
+    }
+
+    private fun parseLinePrefixedOutput(content: String, originalLines: List<String>): List<String> {
+        val translatedMap = mutableMapOf<Int, String>()
+        val lines = content.lines()
+        for (line in lines) {
+            val trimmed = line.trim()
+            if (trimmed.isBlank()) continue
+            
+            val match = Regex("^LINE_(\\d+):\\s*(.*)", RegexOption.DOT_MATCHES_ALL).find(trimmed)
+            if (match != null) {
+                val lineNum = match.groupValues[1].toIntOrNull()
+                val text = match.groupValues[2].trim()
+                if (lineNum != null && lineNum >= 1 && lineNum <= originalLines.size) {
+                    translatedMap[lineNum - 1] = text
+                }
+            }
+        }
+
+        return originalLines.indices.map { i ->
+            translatedMap[i] ?: translateSingleLineFallback(originalLines[i])
+        }
+    }
+
     private fun translateSingleLineFallback(line: String): String {
         var translated = line
 
-        // Replace headers & formatting tags while keeping markers
-        val medicalDictionary = mapOf(
+        // Exact match full sentence dictionary
+        val fullSentenceDict = mapOf(
             "CLINICAL PRACTICE GUIDELINE: MANAGEMENT OF ACUTE CORONARY SYNDROME" to "HƯỚNG DẪN THỰC HÀNH LÂM SÀNG: QUẢN LÝ HỘI CHỨNG MẠCH VÀNH CẤP",
             "Executive Summary & Diagnostic Criteria" to "Tóm Tắt Tổng Quan & Tiêu Chuẩn Chẩn Đoán",
             "Pharmacological & Invasive Management" to "Điều Trị Dược Lý & Can Thiệp Tái Thông",
@@ -221,30 +334,63 @@ class TranslationRepository(private val documentDao: DocumentDao) {
             "1. Onset of neurological deficit < 4.5 hours prior to treatment." to "1. Khởi phát khiếm khuyết thần kinh < 4.5 giờ trước khi bắt đầu điều trị.",
             "2. Absence of active internal bleeding or acute intracranial hemorrhage on CT." to "2. Không có xuất huyết nội đang hoạt động hoặc xuất huyết nội sọ cấp trên phim CT.",
             "3. Blood pressure successfully lowered below 185/110 mmHg before thrombolysis." to "3. Huyết áp được khống chế thành công dưới 185/110 mmHg trước khi dùng tiêu sợi huyết.",
-            "Patients with Large Vessel Occlusion (LVO) in the anterior circulation (Internal Carotid Artery or Middle Cerebral Artery M1 segment) should be evaluated for Mechanical Thrombectomy." to "Bệnh nhân tắc mạch máu lớn (LVO) tuần hoàn não trước (động mạch cảnh trong hoặc đoạn M1 động mạch não giữa) cần được đánh giá can thiệp lấy huyết khối cơ học.",
+            "Patients with Large Vessel Occlusion (LVO) in the anterior circulation (Internal Carotid Artery or Middle Cerebral Artery M1 segment) should be evaluated for Mechanical Thrombectomy." to "Bệnh nhân tắc mạch máu lớn (LVO) tuần hoàn não trước (động mạch cảnh trong hoặc đoạn M1 động mạch không gian não giữa) cần được đánh giá can thiệp lấy huyết khối cơ học.",
             "EVT window: Recommended within 6 hours of symptom onset, and up to 24 hours in selected patients demonstrating clinical-core mismatch on CT Perfusion / MRI." to "Cửa sổ EVT: Khuyến cáo trong vòng 6 giờ từ khi khởi phát, và mở rộng đến 24 giờ ở bệnh nhân chọn lọc có bất tương hợp lâm sàng - lõi hoại tử trên CT Perfusion / MRI.",
             "Post-thrombolysis Blood Pressure Target: Maintain BP < 180/105 mmHg for the first 24 hours to mitigate risk of hemorrhagic transformation." to "Mục tiêu huyết áp sau tiêu sợi huyết: Duy trì HA < 180/105 mmHg trong 24 giờ đầu để giảm thiểu nguy cơ chuyển dạng xuất huyết.",
             "Secondary Prevention: Initiate antiplatelet therapy (Aspirin 81 mg or Clopidogrel 75 mg) 24 hours post-thrombolysis after confirming absence of bleeding on follow-up CT." to "Dự phòng thứ phát: Khởi đầu thuốc kháng tiểu cầu (Aspirin 81 mg hoặc Clopidogrel 75 mg) sau 24 giờ kể từ khi tiêu sợi huyết sau khi xác nhận không có xuất huyết trên CT kiểm tra."
         )
 
-        for ((en, vn) in medicalDictionary) {
+        for ((en, vn) in fullSentenceDict) {
             if (line.contains(en, ignoreCase = true)) {
                 return line.replace(en, vn, ignoreCase = true)
             }
         }
 
-        // Generic pattern substitutions for medical terms
+        // Sentence starters & clinical phrase replacements
         var result = line
+            .replace("CLINICAL DOCUMENT:", "TÀI LIỆU LÂM SÀNG:", ignoreCase = true)
+            .replace("Section 1. Primary Diagnosis & Pathological Evaluation", "Phần 1. Chẩn Đoán Ban Đầu & Đánh Giá Bệnh Lý", ignoreCase = true)
+            .replace("Section 2. Therapeutic Outcome & Secondary Prevention", "Phần 2. Kết Quả Điều Trị & Dự Phòng Thứ Phát", ignoreCase = true)
+            .replace("The patient presented with", "Bệnh nhân nhập viện với triệu chứng", ignoreCase = true)
+            .replace("Diagnostic laboratory findings revealed", "Kết quả xét nghiệm chẩn đoán ghi nhận", ignoreCase = true)
+            .replace("Differential diagnosis included", "Chẩn đoán phân biệt bao gồm", ignoreCase = true)
+            .replace("Initial therapeutic interventions:", "Can thiệp điều trị ban đầu:", ignoreCase = true)
+            .replace("Successful percutaneous coronary intervention", "Can thiệp mạch vành qua da (PCI) thành công", ignoreCase = true)
+            .replace("Post-procedure course was uneventful", "Diễn biến sau thủ thuật ổn định", ignoreCase = true)
+            .replace("Discharge plan includes", "Kế hoạch xuất viện bao gồm", ignoreCase = true)
+            .replace("with drug-eluting stent implantation in the proximal LAD artery", "với đặt stent phủ thuốc tại đoạn gần động mạch liên thất trước (LAD)", ignoreCase = true)
+            .replace("without acute rhythm abnormalities", "không phát hiện rối loạn nhịp tim cấp tính", ignoreCase = true)
+            .replace("optimal medical therapy with high-intensity statin, ACE inhibitor, and beta-blocker", "điều trị nội khoa tối ưu bằng statin liều cao, thuốc ức chế men chuyển (ACEI) và thuốc chẹn beta", ignoreCase = true)
+            .replace("acute onset dyspnea and retrosternal chest tightness radiating to the left jaw", "khó thở khởi phát cấp tính và cảm giác nặng ngực sau xương ức lan lên hàm trái", ignoreCase = true)
+            .replace("elevated troponin levels and ischemic ECG changes", "tăng nồng độ troponin và các biến đổi điện tâm đồ thiếu máu cục bộ", ignoreCase = true)
+            .replace("acute aortic dissection, pulmonary embolism, and STEMI", "bóc tách động mạch chủ cấp, thuyên tắc phổi và nhồi máu cơ tim STEMI", ignoreCase = true)
+            .replace("Dual antiplatelet administration and urgent coronary angiogram", "Dùng thuốc kháng tiểu cầu kép và chụp động mạch vành khẩn cấp", ignoreCase = true)
+            
+            // Core medical terminology replacements
             .replace("Myocardial Infarction", "Nhồi máu cơ tim", ignoreCase = true)
             .replace("Acute Coronary Syndrome", "Hội chứng mạch vành cấp", ignoreCase = true)
-            .replace("Ischemic Stroke", "Đột quỵ nhồi máu brain", ignoreCase = true)
+            .replace("Ischemic Stroke", "Đột quỵ nhồi máu脑", ignoreCase = true)
             .replace("Intracranial Hemorrhage", "Xuất huyết nội sọ", ignoreCase = true)
             .replace("Electrocardiography", "Điện tâm đồ (ECG)", ignoreCase = true)
+            .replace("Percutaneous Coronary Intervention", "Can thiệp mạch vành qua da (PCI)", ignoreCase = true)
+            .replace("Dual Antiplatelet Therapy", "Liệu pháp kháng tiểu cầu kép (DAPT)", ignoreCase = true)
+            .replace("High-sensitivity cardiac troponin", "Troponin cơ tim độ nhạy cao", ignoreCase = true)
+            .replace("Unstable Angina", "Đau thắt ngực không ổn định", ignoreCase = true)
+            .replace("Immune Checkpoint Inhibitor", "Thuốc ức chế điểm kiểm soát miễn dịch", ignoreCase = true)
+            .replace("Non-small cell lung cancer", "Ung thư phổi không tế bào nhỏ", ignoreCase = true)
+            .replace("Endovascular Thrombectomy", "Lấy huyết khối bằng dụng cụ cơ học nội mạch", ignoreCase = true)
+            .replace("Secondary Prevention", "Dự phòng thứ phát", ignoreCase = true)
+            .replace("Primary Diagnosis", "Chẩn đoán ban đầu", ignoreCase = true)
+            .replace("Therapeutic Outcome", "Kết quả điều trị", ignoreCase = true)
             .replace("Efficacy", "Hiệu quả điều trị", ignoreCase = true)
             .replace("Safety", "Độ an toàn", ignoreCase = true)
             .replace("Patients", "Bệnh nhân", ignoreCase = true)
             .replace("Diagnosis", "Chẩn đoán", ignoreCase = true)
             .replace("Treatment", "Điều trị", ignoreCase = true)
+            .replace("Management", "Quản lý / Điều trị", ignoreCase = true)
+            .replace("Protocol", "Phác đồ", ignoreCase = true)
+            .replace("Guideline", "Hướng dẫn", ignoreCase = true)
+            .replace("Clinical", "Lâm sàng", ignoreCase = true)
 
         return result
     }

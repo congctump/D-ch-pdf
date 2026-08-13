@@ -52,7 +52,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // App state
-    private val _apiKey = MutableStateFlow(com.example.BuildConfig.DEEPSEEK_API_KEY)
+    private val _apiKey = MutableStateFlow(
+        com.example.BuildConfig.DEEPSEEK_API_KEY.let {
+            if (it.startsWith("MY_") || it.startsWith("YOUR_") || it.isBlank()) "" else it
+        }
+    )
     val apiKey: StateFlow<String> = _apiKey.asStateFlow()
 
     private val _selectedModel = MutableStateFlow("deepseek-chat")

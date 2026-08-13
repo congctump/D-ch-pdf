@@ -78,7 +78,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // DeepSeek API Key Configuration Card
+        // API Key Configuration Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
@@ -94,7 +94,7 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "DeepSeek API Key",
+                        text = "API Key Dịch Thuật AI (DeepSeek / Gemini)",
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                     )
                 }
@@ -102,7 +102,7 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = "Nhập API Key của bạn từ platform.deepseek.com để thực hiện dịch thuật AI chuẩn xác nhất.",
+                    text = "Nhập API Key DeepSeek (sk-...) hoặc Google Gemini (AIza...) để kích hoạt dịch thuật AI đám mây trực tiếp.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -112,7 +112,7 @@ fun SettingsScreen(
                 OutlinedTextField(
                     value = keyInput,
                     onValueChange = { keyInput = it },
-                    label = { Text("DeepSeek API Key (sk-...)") },
+                    label = { Text("API Key (DeepSeek sk-... hoặc Gemini AIza...)") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("api_key_input"),
@@ -125,7 +125,7 @@ fun SettingsScreen(
                 Button(
                     onClick = {
                         viewModel.updateApiKey(keyInput)
-                        Toast.makeText(context, "Đã lưu API Key DeepSeek thành công!", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Đã lưu API Key thành công!", Toast.LENGTH_SHORT).show()
                     },
                     modifier = Modifier
                         .fillMaxWidth()
@@ -165,9 +165,9 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 val models = listOf(
-                    "deepseek-chat" to "DeepSeek V3 Chat (Khuyên dùng: Tốc độ cao, thuật ngữ chính xác)",
-                    "deepseek-reasoner" to "DeepSeek R1 Reasoner (Suy luận chuyên sâu bài báo y học phức tạp)",
-                    "gemini-2.5-flash" to "Gemini 2.5 Flash (Mô hình dự phòng của Google)"
+                    "deepseek-chat" to "DeepSeek V3 Chat (Yêu cầu DeepSeek API Key sk-...)",
+                    "deepseek-reasoner" to "DeepSeek R1 Reasoner (Yêu cầu DeepSeek API Key sk-...)",
+                    "gemini-3.5-flash" to "Google Gemini 3.5 Flash (Yêu cầu Gemini API Key AIza...)"
                 )
 
                 models.forEach { (modelId, desc) ->
