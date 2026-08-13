@@ -1,0 +1,6 @@
+{
+  "name": "Medical PDF Translator",
+  "description": "AI-powered English to Vietnamese Medical PDF document translator preserving layout, line structure, and terminology.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
